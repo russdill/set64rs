@@ -512,6 +512,7 @@ class Control(PIDTab):
     regs = [ 'SV', 'AL1', 'AL2', 'At' ]
     def __init__(self, pid):
         PIDTab.__init__(self, pid)
+        # FIMXE: Add NAT and A/T action
 
 class Status(Gtk.Table):
     regs = [ 'PV', 'dSV', 'OUT', 'Pr+t', 'flags' ]
@@ -593,9 +594,95 @@ class Status(Gtk.Table):
         finally:
             self.pid.unbusy()
 
-class PID(Gtk.Box):
+class PID(Gtk.TreeView):
     def __init__(self, pid):
-        Gtk.Box.__init__(self, orientation=Gtk.Orientation.VERTICAL)
+        # FIXME: Add copy to/from manual pid
+        self.pid = pid
+        self.refreshed = False
+        self.store = Gtk.ListStore(int, str, int, int)
+        Gtk.TreeView.__init__(self, self.store)
+
+        renderer = Gtk.CellRendererText()
+        column = Gtk.TreeViewColumn("Group", renderer, text=0)
+        self.append_column(column)
+
+        renderer = Gtk.CellRendererText()
+        renderer.set_property("editable", True)
+        renderer.connect('edited', self.on_p_edited)
+        column = Gtk.TreeViewColumn("P", renderer, text=1)
+        self.append_column(column)
+
+        renderer = Gtk.CellRendererText()
+        renderer.set_property("editable", True)
+        renderer.connect('edited', self.on_i_edited)
+        column = Gtk.TreeViewColumn("I", renderer, text=2)
+        self.append_column(column)
+
+        renderer = Gtk.CellRendererText()
+        renderer.set_property("editable", True)
+        renderer.connect('edited', self.on_d_edited)
+        column = Gtk.TreeViewColumn("d", renderer, text=3)
+        self.append_column(column)
+
+        for i in range(1,10):
+            self.store.append([i, '', 0, 0])
+
+        pid.connect('changed', self.changed)
+
+    def on_p_edited(self, widget, path, text):
+        n = 'P'+(str(int(path) + 1))
+        try:
+            d = self.pid.raw(n, float(text))
+            d.addErrback(lambda x: None)
+        except:
+            pass
+
+    def on_i_edited(self, widget, path, text):
+        n = 'I'+(str(int(path) + 1))
+        try:
+            d = self.pid.raw(n, int(text))
+            d.addErrback(lambda x: None)
+        except:
+            pass
+
+    def on_d_edited(self, widget, path, text):
+        n = 'd'+(str(int(path) + 1))
+        try:
+            d = self.pid.raw(n, int(text))
+            d.addErrback(lambda x: None)
+        except:
+            pass
+
+    def changed(self, pid, n, val, mult):
+        if len(n) != 2 or n[0] not in "PId" or n[1] not in "123456789":
+            return
+        path = str(int(n[1]) - 1)
+        treeiter = self.store.get_iter(path)
+        col = '_PId'.index(n[0])
+        if n[0] == 'P':
+            val = '%.1f' % (0.1 if val is None else val)
+        else:
+            val = 0 if val is None else val
+        self.store.set(treeiter, col, val)
+
+    def on_show(self):
+        if not self.refreshed:
+            self.refresh()
+
+    def refresh(self):
+        d = self._refresh()
+        #d.addErrback(lambda x: None)
+
+    @twisted.internet.defer.inlineCallbacks
+    def _refresh(self):
+        self.pid.busy()
+        try:
+            for row in range(1,10):
+                for col in "PId":
+                    yield self.pid.holding_read(col + str(row))
+            self.refreshed = True
+        finally:
+            self.pid.unbusy()
 
 class Ramp_soak(Gtk.Box):
     def __init__(self, pid):
