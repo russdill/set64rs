@@ -19,6 +19,7 @@ import pymodbus.client.async
 import pymodbus.transaction
 import sys
 import math
+import time
 
 import twisted.internet.gtk3reactor
 twisted.internet.gtk3reactor.install()
@@ -29,6 +30,9 @@ import twisted.internet.protocol
 
 from gi.repository import Gtk, GObject
 
+import matplotlib.figure
+import matplotlib.ticker
+from matplotlib.backends.backend_gtk3cairo import FigureCanvasGTK3Cairo as FigureCanvas
 
 inty = [ 'T Tc', 'R Tc', 'J Tc', 'Wre3-Wre5', 'B Tc', 'S Tc', 'K Tc', 'E Tc', 'Pt100',
          'Cu50', '0-375Ω', '0-80mV', '0-30mV', '0-5V', '1-5V', '0-10V', '0-10mA', '0-20mA', '4-20mA' ]
@@ -38,10 +42,11 @@ alarm_modes = [ 'Program', 'High alarm', 'Low alarm', 'Deviation high alarm', 'D
                 'High alarm (w/hold)', 'Low alarm (w/hold)', 'Deviation high alarm (w/hold)',
                 'Deviation low alarm (w/hold)', 'Band alarm (w/hold)', 'Deviation high/low alarm (w/hold)' ]
 
-output_type = { '0-10mA': 0, '4-20mA': 1, '0-20mA': 2, 'Proprortioning cycle (s)': (3,100) }
+# For SSR, use Duty cycle
+output_type = { '0-10mA': 0, '4-20mA': 1, '0-20mA': 2, 'Duty cycle (s)': (3,100) }
 
 run_modes = { 'Energize J1': -1011, 'De-energize J1': -1010, 'Energize J2': -1021, 'De-energize J2': -1020,
-              'Jump': (-64,-1), 'Pause': 0, 't': (1,9999) }
+              'Jump': (-64,-1), 'Pause': 0, 'Run': (1,9999) }
 
 #    Symbol  Description                           Address   Range           Factory set value
 
@@ -70,6 +75,7 @@ registers = {
     'outL': ("Output low limit",                  0x100B,   (0,100.0),      0,     0.1),#%
     'outH': ("Output high limit",                 0x100C,   (0,100.0),      100,   0.1),#%
     'nout': ("Output value when input is abnormal",0x100D,  (0,100),        20,    1.0),#%
+    # Added to Pv
     'Psb': ("PV bias",                            0x100E,   (-1999,9999),   0,     None),
     'FILt': ("Digital filter",                    0x100F,   (0,3),          1,     1.0),
 
@@ -161,15 +167,15 @@ for i in range(0, 64):
     registers['t-%02d'%(i+1)] = ('Run time of %s step' % step, 0x4001 + i*3, run_modes, 0, 1.0)
     registers['Sv%02d'%(i+1)] = ('SV of %s step' % step, 0x4002 + i*3, (-1999,9999), 0, 1.0)
 
-#Note for reprogramming, Slot 63 will not count down.
+#Note for reprogramming, Slot PrH will not count down.
 # Set ModL to SV
-# Set 63 to t 1
-# Set current program to Jump to 63
+# Set PrH to t 1
+# Set current program to Jump to PrH
 # Set ModL to S-SV
 # Set ModL to SV
 # Reprogram
-# Set 63 to Jump 1
-# Reprogram 63
+# Set PrH to Jump PrL
+# Reprogram PrH
 # Set ModL to S-SV
 
 # It does not appear there is a way to cancel a pause.
@@ -239,59 +245,60 @@ class ExampleProtocol(pymodbus.client.async.ModbusClientProtocol, GObject.GObjec
     @twisted.internet.defer.inlineCallbacks
     def holding_read(self, reg, suppress=False):
         self.busy()
-        if type(reg) is int:
-            register = None
-            addr = reg
-        else:
-            register = registers[reg]
-            addr = register[1]
         try:
-            response = yield timeout(0.5)(self.read_holding_registers)(addr, 2, self.unit_id)
-        except TimeoutError, e:
-            self.unbusy()
-            self.reset()
-            raise e
-        
-        mult = 1.0
-        if reg == 'Pr+t':
-            Pr = response.registers[0]>>8
-            t = ((response.registers[0] & 0xff)<<8) + (response.registers[1]>>8)
-            val = (Pr, t)
-        else:
-            value = response.registers[0]
-            value = value - 0x10000 if value > 0x7fff else value
-            mult = 10**-response.registers[1]
-            value *= mult
-            if register is None:
-                val = value
-                reg = '0x%04x' % reg
+            if type(reg) is int:
+                register = None
+                addr = reg
             else:
-                val = None
-                if type(register[2]) is tuple:
-                    if value >= register[2][0] and value <= register[2][1]:
-                        val = value
-                    else:
-                        pass
-                elif type(register[2]) is list:
-                    try:
-                        val = register[2][value]
-                    except:
-                        pass
-                elif type(register[2]) is dict:
-                    for key, item in register[2].iteritems():
-                        if type(item) is tuple:
-                            if value >= item[0] and value <= item[1]:
-                                val = (key, value)
+                register = registers[reg]
+                addr = register[1]
+            try:
+                response = yield timeout(0.5)(self.read_holding_registers)(addr, 2, self.unit_id)
+            except TimeoutError, e:
+                self.reset()
+                raise e
+
+            mult = 1.0
+            if reg == 'Pr+t':
+                Pr = response.registers[0]>>8
+                t = ((response.registers[0] & 0xff)<<8) + (response.registers[1]>>8)
+                val = (Pr, t)
+            else:
+                value = response.registers[0]
+                value = value - 0x10000 if value > 0x7fff else value
+                mult = 10**-response.registers[1]
+                value *= mult
+                if register is None:
+                    val = value
+                    reg = '0x%04x' % reg
+                else:
+                    val = None
+                    if type(register[2]) is tuple:
+                        if value >= register[2][0] and value <= register[2][1]:
+                            val = value
+                        else:
+                            pass
+                    elif type(register[2]) is list:
+                        try:
+                            val = register[2][value]
+                        except:
+                            pass
+                    elif type(register[2]) is dict:
+                        for key, item in register[2].iteritems():
+                            if type(item) is tuple:
+                                if value >= item[0] and value <= item[1]:
+                                    val = (key, value)
+                                    break
+                            elif item == value:
+                                val = key
                                 break
-                        elif item == value:
-                            val = key
-                            break
-        if not suppress:
-            self.emit("changed", reg, val, mult)
-        d = twisted.internet.defer.Deferred()
-        twisted.internet.reactor.callLater(0.004, d.callback, None)
-        yield d
-        self.unbusy()
+            if not suppress:
+                self.emit("changed", reg, val, mult)
+            d = twisted.internet.defer.Deferred()
+            twisted.internet.reactor.callLater(0.004, d.callback, None)
+            yield d
+        finally:
+            self.unbusy()
         twisted.internet.defer.returnValue((val, mult))
 
     @twisted.internet.defer.inlineCallbacks
@@ -306,55 +313,55 @@ class ExampleProtocol(pymodbus.client.async.ModbusClientProtocol, GObject.GObjec
     @twisted.internet.defer.inlineCallbacks
     def holding_write(self, reg, value):
         self.busy()
-        d = None
-        if reg == 'A/M':
-            d = timeout(0.5)(self.write_coil)(1, int(value), self.unit_id)
-        elif reg == 'NAT':
-            d = timeout(0.5)(self.write_coil)(0, int(value), self.unit_id)
-        else:
-            register = registers[reg]
-            val = None
-            if type(register[2]) is tuple:
-                if register[2][0] <= float(value) <= register[2][1]:
-                    val = float(value)
-            elif type(register[2]) is list:
-                try:
-                    val = register[2].index(value)
-                except:
-                    pass
-            elif type(register[2]) is dict:
-                try:
-                    if type(value) is tuple:
-                        value, idx = value
-                    item = register[2][value]
-                    if type(item) is tuple:
-                        if item[0] <= float(idx) <= item[1]:
-                            val = float(idx)
-                    else:
-                        val = item
-                except:
-                    pass
-    
-            if val is None:
-                self.unbusy()
-                raise Exception('invalid argument')
-            else:
-                d = self.holding_read(reg, suppress=True)
-                _, mult = yield d
-                val /= mult
-                if val < 0:
-                    val += 0x10000
-                d = timeout(0.5)(self.write_registers)(register[1], [int(val+1e-6), 0], self.unit_id)
         try:
+            d = None
+            if reg == 'A/M':
+                d = timeout(0.5)(self.write_coil)(1, int(value), self.unit_id)
+            elif reg == 'NAT':
+                d = timeout(0.5)(self.write_coil)(0, int(value), self.unit_id)
+            else:
+                register = registers[reg]
+                val = None
+                if type(register[2]) is tuple:
+                    if register[2][0] <= float(value) <= register[2][1]:
+                        val = float(value)
+                elif type(register[2]) is list:
+                    try:
+                        val = register[2].index(value)
+                    except:
+                        pass
+                elif type(register[2]) is dict:
+                    try:
+                        if type(value) is tuple:
+                            value, idx = value
+                        item = register[2][value]
+                        if type(item) is tuple:
+                            if item[0] <= float(idx) <= item[1]:
+                                val = float(idx)
+                        else:
+                            val = item
+                    except:
+                        pass
+
+                if val is None:
+                    raise Exception('invalid argument')
+                else:
+                    d = self.holding_read(reg, suppress=True)
+                    _, mult = yield d
+                    val /= mult
+                    if val < 0:
+                        val += 0x10000
+                    d = timeout(0.5)(self.write_registers)(register[1], [int(val+1e-6), 0], self.unit_id)
+            try:
+                yield d
+            except TimeoutError, e:
+                self.reset()
+                raise e
+            d = twisted.internet.defer.Deferred()
+            twisted.internet.reactor.callLater(0.004, d.callback, None)
             yield d
-        except TimeoutError, e:
+        finally:
             self.unbusy()
-            self.reset()
-            raise e        
-        d = twisted.internet.defer.Deferred()
-        twisted.internet.reactor.callLater(0.004, d.callback, None)
-        yield d
-        self.unbusy()
 
 class SerialModbusClient(twisted.internet.serialport.SerialPort):
     def __init__(self, *args, **kwargs):
@@ -426,7 +433,7 @@ class PIDTab(Gtk.Table):
                     break
             if idx is not None:
                 self.spin[n].set_value(idx)
-    
+
         else:
             self.adj[n].set_step_increment(mult)
             if mult < 1.0:
@@ -596,7 +603,6 @@ class Status(Gtk.Table):
 
 class PID(Gtk.TreeView):
     def __init__(self, pid):
-        # FIXME: Add copy to/from manual pid
         self.pid = pid
         self.refreshed = False
         self.store = Gtk.ListStore(int, str, int, int)
@@ -606,28 +612,48 @@ class PID(Gtk.TreeView):
         column = Gtk.TreeViewColumn("Group", renderer, text=0)
         self.append_column(column)
 
-        renderer = Gtk.CellRendererText()
+        reg = registers['P1']
+        adj = Gtk.Adjustment(reg[3], reg[2][0], reg[2][1], reg[4])
+        renderer = Gtk.CellRendererSpin()
         renderer.set_property("editable", True)
+        renderer.set_property("adjustment", adj)
+        renderer.set_property("digits", 1)
         renderer.connect('edited', self.on_p_edited)
-        column = Gtk.TreeViewColumn("P", renderer, text=1)
+        column = Gtk.TreeViewColumn("P                              ", renderer, text=1)
         self.append_column(column)
 
-        renderer = Gtk.CellRendererText()
+        reg = registers['I1']
+        adj = Gtk.Adjustment(reg[3], reg[2][0], reg[2][1], reg[4])
+        renderer = Gtk.CellRendererSpin()
         renderer.set_property("editable", True)
+        renderer.set_property("adjustment", adj)
+        renderer.set_property("width-chars", 20)
         renderer.connect('edited', self.on_i_edited)
-        column = Gtk.TreeViewColumn("I", renderer, text=2)
+        column = Gtk.TreeViewColumn("I                              ", renderer, text=2)
         self.append_column(column)
 
-        renderer = Gtk.CellRendererText()
+        reg = registers['d1']
+        adj = Gtk.Adjustment(reg[3], reg[2][0], reg[2][1], reg[4])
+        renderer = Gtk.CellRendererSpin()
         renderer.set_property("editable", True)
+        renderer.set_property("adjustment", adj)
         renderer.connect('edited', self.on_d_edited)
-        column = Gtk.TreeViewColumn("d", renderer, text=3)
+        column = Gtk.TreeViewColumn("d                              ", renderer, text=3)
         self.append_column(column)
 
         for i in range(1,10):
-            self.store.append([i, '', 0, 0])
+            self.store.append([i, '0.1', 0, 0])
+
+        self.popup = Gtk.Menu()
+        item = Gtk.MenuItem('Load from work tab')
+        item.connect('activate', self.on_load)
+        self.popup.append(item)
+        item = Gtk.MenuItem('Export to work tab')
+        item.connect('activate', self.on_export)
+        self.popup.append(item)
 
         pid.connect('changed', self.changed)
+        self.connect('button-release-event', self.on_button)
 
     def on_p_edited(self, widget, path, text):
         n = 'P'+(str(int(path) + 1))
@@ -653,6 +679,50 @@ class PID(Gtk.TreeView):
         except:
             pass
 
+    def on_button(self, widget, event):
+        if event.button != 3:
+            return
+
+        path_info = self.get_path_at_pos(event.x, event.y)
+        if path_info is None:
+            return
+
+        self.click_path, col, x, y = path_info
+        self.grab_focus()
+        self.set_cursor(self.click_path, None)
+        self.popup.popup(None, None, None, None, event.button, event.time)
+        self.popup.show_all()
+        return True
+
+    def on_load(self, widget):
+        d = self.do_load(self.click_path)
+        d.addErrback(lambda x: None)
+
+    @twisted.internet.defer.inlineCallbacks
+    def do_load(self, path):
+        self.pid.busy()
+        try:
+            row = str(int(str(path)) + 1)
+            for i in 'PId':
+                val, mult = yield self.pid.holding_read(i)
+                yield self.pid.raw(i + row, val)
+        finally:
+            self.pid.unbusy()
+
+    def on_export(self, widget):
+        d = self.do_export(self.click_path)
+
+    @twisted.internet.defer.inlineCallbacks
+    def do_export(self, path):
+        self.pid.busy()
+        try:
+            row = str(int(str(path)) + 1)
+            for i in 'PId':
+                val, mult = yield self.pid.holding_read(i + row)
+                yield self.pid.raw(i, val)
+        finally:
+            self.pid.unbusy()
+
     def changed(self, pid, n, val, mult):
         if len(n) != 2 or n[0] not in "PId" or n[1] not in "123456789":
             return
@@ -671,27 +741,305 @@ class PID(Gtk.TreeView):
 
     def refresh(self):
         d = self._refresh()
-        #d.addErrback(lambda x: None)
+        d.addErrback(lambda x: None)
 
     @twisted.internet.defer.inlineCallbacks
     def _refresh(self):
         self.pid.busy()
         try:
             for row in range(1,10):
+                self.set_cursor(str(row-1), None)
                 for col in "PId":
                     yield self.pid.holding_read(col + str(row))
+            self.set_cursor("0", None)
             self.refreshed = True
         finally:
             self.pid.unbusy()
 
-class Ramp_soak(Gtk.Box):
+class Ramp_soak(Gtk.ScrolledWindow):
     def __init__(self, pid):
-        Gtk.Box.__init__(self, orientation=Gtk.Orientation.VERTICAL)
+        self.pid = pid
+        self.refreshed = False
+        self.store = Gtk.ListStore(int, int, str, int, int)
+        self.tree = Gtk.TreeView(self.store)
+        Gtk.ScrolledWindow.__init__(self)
 
+        renderer = Gtk.CellRendererText()
+        column = Gtk.TreeViewColumn("Step", renderer, text=0)
+        self.tree.append_column(column)
+
+        reg = registers['C-01']
+        adj = Gtk.Adjustment(reg[3]+1, reg[2][0]+1, reg[2][1]+1, reg[4])
+        renderer = Gtk.CellRendererSpin()
+        renderer.set_property("editable", True)
+        renderer.set_property("adjustment", adj)
+        renderer.connect('edited', self.on_group_edited)
+        column = Gtk.TreeViewColumn("PID Group", renderer, text=1)
+        self.tree.append_column(column)
+
+        mode_store = Gtk.ListStore(str)
+        for mode in run_modes.keys():
+            mode_store.append([mode])
+
+        renderer = Gtk.CellRendererCombo()
+        renderer.set_property("editable", True)
+        renderer.set_property("model", mode_store)
+        renderer.set_property("has-entry", False)
+        renderer.set_property("text-column", 0)
+        renderer.connect('edited', self.on_mode_edited)
+        column = Gtk.TreeViewColumn("Mode", renderer, text=2)
+        self.tree.append_column(column)
+
+        reg = registers['t-01']
+        adj = Gtk.Adjustment(1, reg[2]['Run'][0], reg[2]['Run'][1], reg[4])
+        renderer = Gtk.CellRendererSpin()
+        renderer.set_property("editable", True)
+        renderer.set_property("adjustment", adj)
+        renderer.connect('edited', self.on_time_edited)
+        column = Gtk.TreeViewColumn("Runtime/Jump to", renderer, text=3)
+        self.tree.append_column(column)
+
+        reg = registers['Sv01']
+        adj = Gtk.Adjustment(reg[3], reg[2][0], reg[2][1], reg[4])
+        renderer = Gtk.CellRendererSpin()
+        renderer.set_property("editable", True)
+        renderer.set_property("adjustment", adj)
+        renderer.connect('edited', self.on_sv_edited)
+        column = Gtk.TreeViewColumn("Set Value", renderer, text=4)
+        self.tree.append_column(column)
+
+        for i in range(1,65):
+            self.store.append([i, 1, 'Pause', 1, 0])
+
+        self.add(self.tree)
+        pid.connect('changed', self.changed)
+
+    def on_group_edited(self, widget, path, text):
+        n = 'C-%02d' % (int(str(path)) + 1)
+        d = self.pid.raw(n, int(text)-1)
+        d.addErrback(lambda x: None)
+
+    def on_mode_edited(self, widget, path, text):
+        n = 't-%02d' % (int(str(path)) + 1)
+        if text == 'Jump' or text == 'Run':
+            treeiter = self.store.get_iter(path)
+            idx = self.store.get(treeiter, 3)[0]
+            if text == 'Jump':
+                if not 1 <= idx <= 64:
+                    idx = 1
+                idx = -idx
+            text = (text, idx)
+        d = self.pid.raw(n, text)
+        d.addErrback(lambda x: None)
+
+    def on_time_edited(self, widget, path, text):
+        n = 't-%02d' % (int(str(path)) + 1)
+        treeiter = self.store.get_iter(path)
+        mode = self.store.get(treeiter, 2)[0]
+        val = int(text)
+        if mode == 'Jump':
+            if not 1 <= val <= 64:
+                return
+            val = -val
+        elif mode == 'Run':
+            pass
+        else:
+            return
+        d = self.pid.raw(n, (mode, val))
+        d.addErrback(lambda x: None)
+
+    def on_sv_edited(self, widget, path, text):
+        n = 'Sv%02d' % (int(str(path)) + 1)
+        d = self.pid.raw(n, int(text))
+        d.addErrback(lambda x: None)
+
+    def changed(self, pid, n, val, mult):
+        if len(n) != 4:
+            return
+        if n[0] in "Ct":
+            if n[1] != '-':
+                return
+        elif n[0:2] == 'Sv':
+            pass
+        else:
+            return
+        if n[2] not in "0123456789" or n[3] not in "0123456789":
+            return
+
+        path = str(int(n[2:4]) - 1)
+        treeiter = self.store.get_iter(path)
+        if n[0] == 'C':
+            val = 0 if val is None else val
+            self.store.set(treeiter, 1, val+1)
+        elif n[0] == 't':
+            idx = None
+            if type(val) is tuple:
+                val, idx = val
+            if val == 'Run':
+                self.store.set(treeiter, 3, idx)
+            elif val == 'Jump':
+                self.store.set(treeiter, 3, abs(idx))
+            self.store.set(treeiter, 2, val)
+        else:
+            val = 0 if val is None else val
+            self.store.set(treeiter, 4, int(val))
+
+    def on_show(self):
+        if not self.refreshed:
+            self.refresh()
+
+    def refresh(self):
+        d = self._refresh()
+        d.addErrback(lambda x: None)
+
+    @twisted.internet.defer.inlineCallbacks
+    def _refresh(self):
+        self.pid.busy()
+        try:
+            for row in range(1,65):
+                self.tree.set_cursor(str(row-1), None)
+                for col in [ "C-", "t-", "Sv" ]:
+                    yield self.pid.holding_read(col + ('%02d' % row))
+            self.tree.set_cursor("0", None)
+            self.refreshed = True
+        finally:
+            self.pid.unbusy()
+
+class ATWindow(Gtk.Window):
+    def __init__(self, pid):
+        Gtk.Window.__init__(self, title="Auto-tune")
+        self.pid = pid
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        f = matplotlib.figure.Figure()
+        self.axes = f.add_subplot(111)
+        self.axes.set_xlabel('Time (sec.)')
+        self.axes.set_ylabel('Temperature (C)')
+        self.axes.autoscale()
+        self.out_axes = self.axes.twinx()
+        self.out_axes.set_ylabel('OUT (%)')
+        self.out_axes.autoscale()
+        #self.axes.set_xlim(0, 5*60)
+        #self.axes.set_ylim(20, 300)
+        self.axes.grid()
+        #self.axes.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(self.format_xaxis))
+        self.pv_x = []
+        self.pv_y = []
+        self.sv_x = []
+        self.sv_y = []
+        self.out_x = []
+        self.out_y = []
+        self.pv_plot, = self.axes.plot(self.pv_x, self.pv_y, 'b--') #b
+        self.sv_plot, = self.axes.plot(self.sv_x, self.sv_y, 'k-') #k
+        self.out_plot, = self.out_axes.plot(self.out_x, self.out_y, 'r:') #r
+
+        self.canvas = FigureCanvas(f)
+        self.canvas.set_size_request(800,600)
+
+        vbox.add(self.canvas)
+
+        hbox = Gtk.Box()
+        button = Gtk.Button('Cancel', Gtk.STOCK_CANCEL)
+        button.connect('clicked', self.on_cancel)
+        hbox.add(button)
+        vbox.add(hbox)
+
+        self.add(vbox)
+        self.run = True
+        self.d = self.loop()
+        self.d.addErrback(lambda x: None)
+        self.connect('delete-event', self.on_delete)
+
+    def on_delete(self, widget, event):
+        self.run = False
+
+    def on_cancel(self, widget):
+        self.emit('delete-event', None)
+        self.destroy()
+
+    @twisted.internet.defer.inlineCallbacks
+    def loop(self):
+        self.pid.busy()
+        try:
+            d = self.pid.raw('NAT', 0)
+            d.addErrback(lambda x: None)
+            yield d
+            yield self.pid.raw('ModL', 'SV')
+            start = time.time()
+            yield self.pid.raw('At', 'On')
+            while self.run:
+                #active = yield self.pid.flags()['AT']
+                #if not active:
+                #    print 'done'
+                #    break
+
+                pv, mult = yield self.pid.holding_read('PV')
+                self.pv_x.append(time.time() - start)
+                self.pv_y.append(pv)
+                self.pv_plot.set_data(self.pv_x, self.pv_y)
+                self.axes.relim()
+                self.axes.autoscale()
+                self.canvas.draw()
+
+                sv, mult = yield self.pid.holding_read('dSV')
+                self.sv_x.append(time.time() - start)
+                self.sv_y.append(sv)
+                self.sv_plot.set_data(self.sv_x, self.sv_y)
+                self.axes.relim()
+                self.axes.autoscale()
+                self.canvas.draw()
+
+                out, mult = yield self.pid.holding_read('OUT')
+                self.out_x.append(time.time() - start)
+                self.out_y.append(out)
+                self.out_plot.set_data(self.out_x, self.out_y)
+                self.out_axes.relim()
+                self.out_axes.autoscale()
+                self.canvas.draw()
+
+                d = twisted.internet.defer.Deferred()
+                twisted.internet.reactor.callLater(1, d.callback, None)
+                yield d
+                print 'dot'
+        finally:
+            d = self.pid.raw('NAT', 0)
+            d.addErrback(lambda x: None)
+            yield d
+            self.pid.unbusy()
+
+
+UI_INFO = """
+<ui>
+  <menubar name='MenuBar'>
+    <menu action='FileMenu'>
+      <menuitem action='FileQuit' />
+    </menu>
+    <menu action='ActionMenu'>
+      <menuitem action='ActionAT' />
+    </menu>
+  </menubar>
+</ui>
+"""
 
 class PIDWindow(Gtk.Window):
     def __init__(self, pid):
         Gtk.Window.__init__(self, title="PID")
+
+        action_group = Gtk.ActionGroup("profile_actions")
+        action_group.add_actions([
+            ("FileMenu", None, "File", None, None, None),
+            ("FileQuit", Gtk.STOCK_QUIT, "_Quit", "<control>Q", None, Gtk.main_quit),
+            ("ActionMenu", None, "Action", None, None, None),
+            ("ActionAT", None, "Auto-tune", None, None, self.on_at)
+        ])
+
+        uimanager = Gtk.UIManager()
+        uimanager.add_ui_from_string(UI_INFO)
+        accelgroup = uimanager.get_accel_group()
+        self.add_accel_group(accelgroup)
+        uimanager.insert_action_group(action_group)
+        menubar = uimanager.get_widget("/MenuBar")
+
         self.pid = pid
         pid.connect('process-start', lambda x: self.set_sensitive(False))
         pid.connect('process-end', lambda x: self.set_sensitive(True))
@@ -704,6 +1052,7 @@ class PIDWindow(Gtk.Window):
         self.notebook.append_page(Ramp_soak(pid), Gtk.Label("Ramp/soak"))
         self.notebook.connect('switch-page', self.on_select_page)
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        vbox.pack_start(menubar, False, False, 0)
         vbox.add(self.notebook)
         hbox = Gtk.Box()
         button = Gtk.Button('Refresh', Gtk.STOCK_REFRESH)
@@ -711,6 +1060,10 @@ class PIDWindow(Gtk.Window):
         hbox.add(button)
         vbox.add(hbox)
         self.add(vbox)
+
+    def on_at(self, widget):
+        win = ATWindow(self.pid)
+        win.show_all()
 
     def refresh(self, button):
         self.notebook.get_nth_page(self.notebook.get_current_page()).refresh()
