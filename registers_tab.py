@@ -16,21 +16,14 @@
 import pld
 import math
 import twisted.internet.defer
+import widgets
 
 from gi.repository import Gtk
+
 
 class PIDTab(Gtk.Table):
     def __init__(self, pid):
         Gtk.Table.__init__(self, len(self.regs), 4)
-        self.spin = {}
-        self.adj = {}
-        self.adj_old = {}
-        self.combo = {}
-        self.pid = pid
-        self.from_pid = False
-        self.ignore_combo = False
-        self.refreshed = False
-        pid.connect('changed', self.changed)
         for row, n in enumerate(self.regs):
             reg = pld.registers[n]
 
@@ -42,120 +35,19 @@ class PIDTab(Gtk.Table):
             label.set_alignment(0, 0.5)
             self.attach(label, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
 
-            adjustment = Gtk.Adjustment()
-            spin = Gtk.SpinButton()
-            spin.set_adjustment(adjustment)
-            self.attach(spin, 3, 4, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
-            self.spin[n] = spin
-            self.adj[n] = adjustment
-            self.adj_old[n] = 0
-
-            if type(reg[2]) is list or type(reg[2]) is dict:
-                combo = Gtk.ComboBoxText()
-                for text in reg[2]:
-                    if text is not None:
-                        combo.append_text(text)
-                combo.connect('changed', self.combo_changed, n)
-                self.combo[n] = combo
-                spin.set_sensitive(False)
+            if type(reg[2]) is list:
+                combo = widgets.PIDComboBoxText(pid, n)
+                self.attach(combo, 3, 4, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+            elif type(reg[2]) is dict:
+                combo = widgets.PIDSpinCombo(pid, n)
+                self.attach(combo.spin, 3, 4, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
                 self.attach(combo, 2, 3, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
-                w = combo
             else:
-                adjustment.set_lower(reg[2][0])
-                adjustment.set_upper(reg[2][1])
-                adjustment.set_step_increment(1)
-                w = spin
-
-            pid.connect('process-start', lambda x, r, n=n, w=w: w.set_sensitive(False) if n == r else None)
-            pid.connect('process-end', lambda x, r, n=n, w=w: w.set_sensitive(True) if n == r else None)
-
-            adjustment.connect('value-changed', self.adj_changed, n)
-
-    def changed(self, pid, n, val, mult):
-        if n not in self.regs:
-            return
-        self.from_pid = True
-        reg = pld.registers[n]
-        if type(reg[2]) is list or type(reg[2]) is dict:
-            idx = None
-            if type(val) is tuple:
-                val, idx = val
-            model = self.combo[n].get_model()
-            for i, row in enumerate(model):
-                if row[0] == val:
-                    self.combo[n].set_active(i)
-                    break
-            if idx is not None:
-                self.spin[n].set_value(idx)
-
-        else:
-            self.adj[n].set_step_increment(mult)
-            if mult < 1.0:
-                self.spin[n].set_digits(-math.log10(mult))
-            else:
-                self.spin[n].set_digits(0)
-            self.adj[n].set_value(val)
-        self.from_pid = False
-
-    def combo_changed(self, combo, n):
-        curr = combo.get_active_text()
-        reg = pld.registers[n]
-        if self.from_pid:
-            if type(reg[2]) is dict:
-                r = reg[2][curr]
-                if type(r) is tuple:
-                    self.adj[n].set_lower(r[0])
-                    self.adj[n].set_upper(r[1])
-                    self.spin[n].set_digits(0)
-                    self.adj[n].set_step_increment(1)
-                    self.spin[n].set_sensitive(True)
-                else:
-                    self.spin[n].set_sensitive(False)
-        elif not self.ignore_combo:
-            self.ignore_combo = True
-            combo.set_active(-1)
-            if type(reg[2]) is dict and type(reg[2][curr]) is tuple:
-                r = reg[2][curr]
-                val = self.adj[n].get_value()
-                val = max(val, r[0])
-                val = min(val, r[1])
-                curr = (curr, val)
-            d = self.pid.raw(n, curr)
-            d.addErrback(lambda x: None)
-        else:
-            self.ignore_combo = False
-
-    def adj_changed(self, adj, n):
-        if self.from_pid:
-            self.adj_old[n] = adj.get_value()
-        else:
-            val = adj.get_value()
-            reg = pld.registers[n]
-            if type(reg[2]) is dict:
-                curr = self.combo[n].get_active_text()
-                if type(reg[2][curr]) is tuple:
-                    val = (curr, val)
-            d = self.pid.raw(n, val)
-            d.addErrback(lambda x: adj.set_value(self.adj_old[n]))
+                spin = widgets.PIDSpinButton(pid, n)
+                self.attach(spin, 3, 4, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
 
     def on_show(self):
-        if not self.refreshed:
-            self.refreshed = True
-            try:
-                self.refresh()
-            except:
-                self.refreshed = False
-
-    def refresh(self):
-        d = self._refresh()
-        d.addErrback(lambda x: None)
-
-    @twisted.internet.defer.inlineCallbacks
-    def _refresh(self):
-        for n in self.regs:
-            d = self.pid.holding_read(n)
-            d.addErrback(lambda x: None)
-        yield self.pid.process_queue()
+        pass
 
 class Function(PIDTab):
     regs = [ 'Inty', 'PvL', 'PvH', 'dot', 'rd', 'obty', 'obL', 'obH', 'oAty',

@@ -226,8 +226,6 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
 
     __gsignals__ = {
         'changed': (GObject.SIGNAL_RUN_FIRST, None, (str,object,float,)),
-        'process-start': (GObject.SIGNAL_RUN_FIRST, None, (str,)),
-        'process-end': (GObject.SIGNAL_RUN_FIRST, None, (str,))
     }
 
     def __init__(self):
@@ -236,44 +234,30 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
         pymodbus.client.async.ModbusClientProtocol.__init__(self, framer)
         self.unit_id = 5
         self.reg_iter = registers.iteritems()
-        self.is_busy = dict()
         self.queue = list()
         self.last = None
-
-    def busy(self, reg):
-        if not reg in self.is_busy:
-            self.is_busy[reg] = 0
-        self.is_busy[reg] += 1
-        if self.is_busy[reg] == 1:
-            self.emit('process-start', reg)
-
-    def unbusy(self, reg):
-        self.is_busy[reg] -= 1
-        if self.is_busy[reg] == 0:
-            self.emit('process-end', reg)
-        assert self.is_busy[reg] >= 0
 
     @twisted.internet.defer.inlineCallbacks
     def _flags(self):
         try:
-            response = yield timeout(1.0)(self.read_coils)(0, 8, self.unit_id)
+            response = yield timeout(0.5)(self.read_coils)(0, 8, unit=self.unit_id)
             val = dict(zip(bits, response.bits))
             self.emit('changed', 'flags', val, 1.0)
         except TimeoutError, e:
-            self.reset()
-            raise e
+            val = None
         finally:
             d = twisted.internet.defer.Deferred()
-            twisted.internet.reactor.callLater(0.004, d.callback, None)
+            twisted.internet.reactor.callLater(0.01, d.callback, None)
             yield d
         twisted.internet.defer.returnValue(val)
 
-    def reset(self):
+    def reset(self, err):
         self.connectionLost('transaction error')
         self.framer._ModbusRtuFramer__buffer = ''
         self.framer._ModbusRtuFramer__header = {}
         self.connectionMade()
-        print 'error'
+        if err is not None:
+            print 'error', err
 
     @twisted.internet.defer.inlineCallbacks
     def _holding_read(self, reg, suppress=False):
@@ -284,9 +268,9 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
             register = registers[reg]
             addr = register[1]
         try:
-            response = yield timeout(0.5)(self.read_holding_registers)(addr, 2, self.unit_id)
+            response = yield timeout(0.8)(self.read_holding_registers)(addr, 2, unit=self.unit_id)
         except TimeoutError, e:
-            self.reset()
+            self.reset('timeout ' + str(reg))
             raise e
 
         mult = 1.0
@@ -326,7 +310,7 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
         if not suppress:
             self.emit("changed", reg, val, mult)
         d = twisted.internet.defer.Deferred()
-        twisted.internet.reactor.callLater(0.004, d.callback, None)
+        twisted.internet.reactor.callLater(0.01, d.callback, None)
         yield d
         twisted.internet.defer.returnValue((val, mult))
 
@@ -358,23 +342,23 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
         if val is None:
             raise Exception('invalid argument')
         elif reg == 'OUT':
-            d = timeout(0.5)(self.write_registers)(register[1], [int(val*10.0+1), 1], self.unit_id)
+            d = timeout(0.8)(self.write_registers)(register[1], [int(val*10.0+1), 1], unit=self.unit_id)
         else:
             d = self._holding_read(reg, suppress=True)
             _, mult = yield d
             val /= mult
             if val < 0:
                 val += 0x10000
-            d = timeout(0.5)(self.write_registers)(register[1], [int(val+1e-6), 0], self.unit_id)
+            d = timeout(0.8)(self.write_registers)(register[1], [int(val+1e-6), 0], unit=self.unit_id)
 
         try:
             yield d
         except TimeoutError, e:
-            self.reset()
+            self.reset('timeout ' + str(reg))
             raise e
 
         d = twisted.internet.defer.Deferred()
-        twisted.internet.reactor.callLater(0.004, d.callback, None)
+        twisted.internet.reactor.callLater(0.01, d.callback, None)
         yield d
 
     @twisted.internet.defer.inlineCallbacks
@@ -398,13 +382,16 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
             raise Exception('Invalid parameter')
 
         try:
-            yield timeout(0.1)(self.write_coil)(v[0], v[1], self.unit_id)
+            yield timeout(0.5)(self.write_coil)(v[0], v[1], unit=self.unit_id)
         except TimeoutError, e:
-            pass
+            self.reset(None)
+
+        d = twisted.internet.defer.Deferred()
+        twisted.internet.reactor.callLater(0.01, d.callback, None)
+        yield d
 
     @twisted.internet.defer.inlineCallbacks
     def flags(self):
-        self.busy('flags')
         us = twisted.internet.defer.Deferred()
         self.queue.append(us)
         try:
@@ -418,13 +405,16 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
         finally:
             self.queue.pop(0)
             us.callback(None)
-            self.unbusy('flags')
         twisted.internet.defer.returnValue(response)
 
     @twisted.internet.defer.inlineCallbacks
-    def holding_read(self, reg, suppress=False, busy=True):
-        if busy:
-            self.busy(reg)
+    def flag(self, name):
+        d = self.flags()
+        ret, _ = yield d
+        twisted.internet.defer.returnValue(ret[name])
+
+    @twisted.internet.defer.inlineCallbacks
+    def holding_read(self, reg, suppress=False):
         us = twisted.internet.defer.Deferred()
         self.queue.append(us)
         try:
@@ -437,15 +427,14 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
             response = yield self._holding_read(reg, suppress)
         finally:
             self.queue.pop(0)
-            if busy:
-                self.unbusy(reg)
             us.callback(None)
         twisted.internet.defer.returnValue(response)
 
     @twisted.internet.defer.inlineCallbacks
-    def coil(self, cmd):
+    def coil(self, cmd, ret=None):
         us = twisted.internet.defer.Deferred()
         self.queue.append(us)
+        response = None
         try:
             if len(self.queue) < 2:
                 d = twisted.internet.defer.Deferred()
@@ -453,14 +442,15 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
                 yield d
             else:
                 yield self.queue[-2]
-            response = yield self._coil(cmd)
+            yield self._coil(cmd)
+            response = ret
         finally:
             self.queue.pop(0)
             us.callback(None)
+        twisted.internet.defer.returnValue(response)
 
     @twisted.internet.defer.inlineCallbacks
     def raw(self, reg, value):
-        self.busy(reg)
         us = twisted.internet.defer.Deferred()
         self.queue.append(us)
         error = False
@@ -475,15 +465,14 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
                 yield self._holding_write(reg, value)
             except:
                 pass
-            yield self._holding_read(reg)
+            response = yield self._holding_read(reg)
         finally:
             self.queue.pop(0)
             us.callback(None)
-            self.unbusy(reg)
+        twisted.internet.defer.returnValue(response)
 
     @twisted.internet.defer.inlineCallbacks
     def holding_write(self, reg, value):
-        self.busy(reg)
         us = twisted.internet.defer.Deferred()
         self.queue.append(us)
         error = False
@@ -498,7 +487,6 @@ class Set64rs(pymodbus.client.async.ModbusClientProtocol, GObject.GObject):
         finally:
             self.queue.pop(0)
             us.callback(None)
-            self.unbusy(reg)
 
     @twisted.internet.defer.deferredGenerator
     def process_queue(self):

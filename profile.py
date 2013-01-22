@@ -46,7 +46,7 @@ class Profile(Gtk.Window):
         self.plot, = self.axes.plot(self.x, self.y, 'o-', picker=5)
         self.minutes = False
         self.file_name = None
-        
+
         self.canvas = FigureCanvas(f)
         self.canvas.set_size_request(800,600)
         self.canvas.mpl_connect('button_press_event', self.onclick)
@@ -158,7 +158,7 @@ class Profile(Gtk.Window):
         if response == Gtk.ResponseType.OK:
             self.save_file(dialog.get_filename())
         dialog.destroy()
- 
+
     def format_xaxis(self, x, pos):
         return self.format_x(x)
 
@@ -189,7 +189,7 @@ class Profile(Gtk.Window):
             val = int(m) * 60.0 + round(float(s), 1)
         except:
             return
-                
+
         at = max(0, int(path))
         if at != 0:
             val = max(val, self.x[at-1])

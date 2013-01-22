@@ -127,7 +127,6 @@ class Ramp_soak(Gtk.ScrolledWindow):
         if n[2] not in "0123456789" or n[3] not in "0123456789":
             return
 
-        print 'changed', n, val
         path = str(int(n[2:4]) - 1)
         self.tree.set_cursor(path, None)
         treeiter = self.store.get_iter(path)

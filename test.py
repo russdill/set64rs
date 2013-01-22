@@ -74,11 +74,6 @@ class PIDWindow(Gtk.Window):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         vbox.pack_start(menubar, False, False, 0)
         vbox.add(self.notebook)
-        hbox = Gtk.Box()
-        button = Gtk.Button('Refresh', Gtk.STOCK_REFRESH)
-        button.connect('clicked', self.refresh)
-        hbox.add(button)
-        vbox.add(hbox)
         self.add(vbox)
 
     def on_at(self, widget):
@@ -88,9 +83,6 @@ class PIDWindow(Gtk.Window):
     def on_monitor(self, widget):
         win = monitor.MonitorWindow(self.pid)
         win.show_all()
-
-    def refresh(self, button):
-        self.notebook.get_nth_page(self.notebook.get_current_page()).refresh()
 
     def on_select_page(self, notebook, page, page_num):
         page.on_show()

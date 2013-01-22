@@ -18,6 +18,9 @@ import pld
 import time
 import twisted.internet.defer
 import math
+import widgets
+import sys
+import traceback
 
 import matplotlib.figure
 import matplotlib.ticker
@@ -27,9 +30,9 @@ class MonitorWindow(Gtk.Window):
     def __init__(self, pid):
         Gtk.Window.__init__(self, title="Monitor")
         self.pid = pid
-        pid.connect('changed', self.changed)
-        self.from_pid = False
         self.restart = False
+        main_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
         f = matplotlib.figure.Figure()
@@ -50,8 +53,6 @@ class MonitorWindow(Gtk.Window):
         self.pv_plot, = self.axes.plot(self.pv_x, self.pv_y, 'b--') #b
         self.sv_plot, = self.axes.plot(self.sv_x, self.sv_y, 'k-') #k
         self.out_plot, = self.out_axes.plot(self.out_x, self.out_y, 'r:') #r
-        self.out_active = False
-        self.sv_active = False
 
         self.canvas = FigureCanvas(f)
         self.canvas.set_size_request(800,600)
@@ -59,56 +60,6 @@ class MonitorWindow(Gtk.Window):
         vbox.add(self.canvas)
 
         hbox = Gtk.Box()
-
-        combo = Gtk.ComboBoxText()
-        for text in pld.registers['ModL'][2]:
-            combo.append_text(text)
-        combo.connect('changed', self.mode_changed)
-        hbox.pack_start(combo, False, False, 0)
-        self.modl_combo = combo
-        self.modl_old = None
-
-        pid.connect('process-start', lambda x, r, w=combo: w.set_sensitive(False) if 'ModL' == r else None)
-        pid.connect('process-end', lambda x, r, w=combo: w.set_sensitive(True) if 'ModL' == r else None)
-
-        label = Gtk.Label('SV')
-        hbox.pack_start(label, False, False, 0)
-
-        # Allow changing SV in manual mode
-        # FIXME: disable if not SV?
-        reg = pld.registers['SV']
-        adjustment = Gtk.Adjustment(reg[3], reg[2][0], reg[2][1], 1)
-        spin = Gtk.SpinButton()
-        spin.set_adjustment(adjustment)
-        adjustment.connect('value-changed', self.sv_changed)
-        hbox.pack_start(spin, False, False, 0)
-        self.sv_old = 0
-        self.sv_adj = adjustment
-        self.sv_spin = spin
-        spin.set_sensitive(self.sv_active)
-
-        pid.connect('process-start', lambda x, r, w=spin: w.set_sensitive(False) if 'SV' == r else None)
-        pid.connect('process-end', lambda x, r, w=spin: w.set_sensitive(self.sv_active) if 'SV' == r else None)
-
-        check = Gtk.CheckButton('Manual')
-        self.manual_check = check
-
-        label = Gtk.Label('OUT')
-        hbox.pack_start(label, False, False, 0)
-
-        reg = pld.registers['OUT']
-        adjustment = Gtk.Adjustment(0.0, reg[2][0], reg[2][1], 0.1)
-        spin = Gtk.SpinButton()
-        spin.set_adjustment(adjustment)
-        adjustment.connect('value-changed', self.out_changed)
-        hbox.pack_start(spin, False, False, 0)
-        self.out_old = 0
-        self.out_adj = adjustment
-        self.out_spin = spin
-        spin.set_sensitive(self.out_active)
-
-        pid.connect('process-start', lambda x, r, w=spin: w.set_sensitive(False) if 'OUT' == r else None)
-        pid.connect('process-end', lambda x, r, w=spin: w.set_sensitive(self.out_active) if 'OUT' == r else None)
 
         # Start/restart program
         button = Gtk.Button('First Step')
@@ -127,7 +78,9 @@ class MonitorWindow(Gtk.Window):
         button.connect('clicked', lambda x: self.pid.coil('end'))
         hbox.pack_start(button, False, False, 0)
 
+        hbox.set_sensitive(False)
         vbox.add(hbox)
+        main_hbox.add(vbox)
 
         # Extra information required
         #   Manual/automatic
@@ -137,67 +90,123 @@ class MonitorWindow(Gtk.Window):
         #   PV/SV/dSV display?
         #   AL1/AL2
 
-        self.add(vbox)
+        self.add(main_hbox)
+
+        table = Gtk.Table()
+        row = 0
+
+        combo = widgets.PIDComboBoxText(pid, 'ModL')
+        pid.connect('changed', lambda pid, n, val, mult, w=combo: w.set_sensitive(not val['A/M']) if n == 'flags' else None)
+        label = Gtk.Label('Mode')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        table.attach(combo, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        row += 1
+
+
+        # Allow changing SV in manual mode
+        # FIXME: disable if not SV?
+        spin = widgets.PIDSpinButton(pid, 'SV')
+        spin.set_sensitive(False)
+        #combo.connect('changed', lambda combo, s=spin, c=combo: s.set_sensitive(c.get_active_text() == 'SV'))
+        pid.connect('changed', lambda pid, n, val, mult, w=spin, c=combo: w.set_sensitive(not val['A/M'] and c.get_active_text() == 'SV') if n == 'flags' else None)
+        pid.connect('changed', lambda pid, n, val, mult, w=spin: w.set_sensitive(val == 'SV') if n == 'ModL' else None)
+        pid.connect('changed', lambda pid, n, val, mult, w=hbox: w.set_sensitive(val != 'SV') if n == 'ModL' else None)
+
+        label = Gtk.Label('Set value')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        table.attach(spin, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        row += 1
+
+        label = Gtk.Label('Dynamic SV')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        label = Gtk.Label()
+        label.set_alignment(0, 0.5)
+        table.attach(label, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        pid.connect('changed', lambda pid, n, val, mult, w=label: w.set_text('%0.1f'%val if mult == .1 else '%d'%val) if n == 'dSV' else None)
+        row += 1
+
+        label = Gtk.Label('PV')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        label = Gtk.Label()
+        label.set_alignment(0, 0.5)
+        table.attach(label, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        pid.connect('changed', lambda pid, n, val, mult, w=label: w.set_text('%0.1f'%val if mult == .1 else '%d'%val) if n == 'PV' else None)
+        row += 1
+
+        check = widgets.ActionCheckButton(lambda val: pid.coil('manual' if val else 'auto', val), read=lambda p=pid: p.flag('A/M'))
+        pid.connect('changed', lambda pid, n, val, mult, w=check: w.set_active(val['A/M'], user=False) if n == 'flags' else None)
+        label = Gtk.Label('Manual mode')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        table.attach(check, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        row += 1
+
+        reg = pld.registers['OUT']
+        spin = widgets.PIDSpinButton(pid, 'OUT')
+        spin.set_sensitive(False)
+        pid.connect('changed', lambda pid, n, val, mult, w=spin: w.set_sensitive(val['A/M']) if n == 'flags' else None)
+
+        label = Gtk.Label('Output level')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        table.attach(spin, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        row += 1
+
+        label = Gtk.Label('Alarm 1')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        label = Gtk.Label()
+        label.set_alignment(0, 0.5)
+        table.attach(label, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        pid.connect('changed', lambda pid, n, val, mult, w=label: w.set_text('On' if val['AL1'] else 'Off') if n == 'flags' else None)
+        row += 1
+
+        label = Gtk.Label('Alarm 2')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        label = Gtk.Label()
+        label.set_alignment(0, 0.5)
+        table.attach(label, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        pid.connect('changed', lambda pid, n, val, mult, w=label: w.set_text('On' if val['AL2'] else 'Off') if n == 'flags' else None)
+        row += 1
+
+        label = Gtk.Label('Current Step')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        label = Gtk.Label()
+        label.set_alignment(0, 0.5)
+        table.attach(label, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        self.current_step = label
+        row += 1
+
+        label = Gtk.Label('Time elapsed/total')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        label = Gtk.Label()
+        label.set_alignment(0, 0.5)
+        table.attach(label, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        self.step_time = label
+        row += 1
+
+        label = Gtk.Label('Step action')
+        label.set_alignment(0, 0.5)
+        table.attach(label, 0, 1, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        label = Gtk.Label()
+        label.set_alignment(0, 0.5)
+        table.attach(label, 1, 2, row, row+1, yoptions=Gtk.AttachOptions.SHRINK)
+        self.status = label
+        row += 1
+
+        main_hbox.add(table)
+
         self.run = True
         self.d = self.loop()
         self.d.addErrback(lambda x: None)
         self.connect('delete-event', self.on_delete)
-
-    def changed(self, pid, n, val, mult):
-        self.from_pid = True
-        try:
-            if n == 'SV':
-                self.sv_spin.set_sensitive(self.sv_active)
-                self.sv_adj.set_step_increment(mult)
-                if mult < 1.0:
-                    self.sv_spin.set_digits(-math.log10(mult))
-                else:
-                    self.sv_spin.set_digits(0)
-                self.sv_adj.set_value(val)
-            elif n == 'OUT':
-                self.out_spin.set_sensitive(self.out_active)
-                self.out_adj.set_step_increment(mult)
-                if mult < 1.0:
-                    self.out_spin.set_digits(-math.log10(mult))
-                else:
-                    self.out_spin.set_digits(0)
-                self.out_adj.set_value(val)
-            elif n == 'ModL':
-                self.sv_active = val == 'SV'
-                self.sv_spin.set_sensitive(self.sv_active)
-                self.modl_combo.set_active(pld.registers[n][2].index(val))
-            elif n == 'flags':
-                self.out_active = val['A/M']
-                self.out_spin.set_sensitive(self.out_active)
-        finally:
-            self.from_pid = False
-
-    def mode_changed(self, widget):
-        if self.from_pid:
-            self.modl_old = widget.get_active()
-        else:
-            self.modl_combo.set_sensitive(False)
-            val = pld.registers['ModL'][2][widget.get_active()]
-            d = self.pid.raw('ModL', val)
-            d.addErrback(lambda x: widget.set_active(self.modl_old))
-
-    def sv_changed(self, adj):
-        if self.from_pid:
-            self.sv_old = adj.get_value()
-        else:
-            self.sv_spin.set_sensitive(False)
-            val = adj.get_value()
-            d = self.pid.raw('SV', val)
-            d.addErrback(lambda x: adj.set_value(self.sv_old))
-
-    def out_changed(self, adj):
-        if self.from_pid:
-            self.out_old = adj.get_value()
-        else:
-            self.out_spin.set_sensitive(False)
-            val = adj.get_value()
-            d = self.pid.raw('OUT', val)
-            d.addErrback(lambda x: adj.set_value(self.out_old))
 
     def on_restart(self, widget):
         self.restart = True
@@ -207,7 +216,6 @@ class MonitorWindow(Gtk.Window):
 
     @twisted.internet.defer.inlineCallbacks
     def loop(self):
-        read_inputs = False
         start = time.time()
         while self.run:
             if self.restart:
@@ -225,47 +233,21 @@ class MonitorWindow(Gtk.Window):
                 yield self.pid.coil('start')
                 yield self.pid.coil('auto')
             try:
-                if not read_inputs:
-                    yield self.pid.holding_read('SV')
-                    yield self.pid.holding_read('ModL')
-                    read_inputs = True
-                    #yield self.pid.coil('manual')
 
-
-                flags = yield self.pid.flags()
-        # Extra information required
-        #   Manual/automatic
-        #   Program step
-        #   Program status (running/pause)
-        #   Time/time remaining in step
-        #   PV/SV/dSV display?
-        #   AL1/AL2
-
-                autotune = flags['AT']
-                manual = flags['A/M']
-                al1 = flags['AL1']
-                al2 = flags['AL2']
                 val, mult = yield self.pid.holding_read('Pr+t')
                 step, step_t = val
                 val, mult = yield self.pid.holding_read('t-' + ('%02d' % step))
                 step_total = 0
-                # FIXME: Next step = PrL if step == PrH?
-                step_next = min(step + 1, 64)
-                pause = False
                 if type(val) is tuple:
                     val, idx = val
                 if val == 'Run':
                     step_total = idx
                 elif val == 'Jump':
-                    step_next = abs(idx)
-                elif val == 'Pause':
-                    pause = True
+                    val += ' to ' + str(abs(idx))
 
-                print 'AT', autotune, 'manual', manual
-                print 'al1', al1, 'al2', al2
-                print 'step', step, step_t, 'of', step_total
-                print 'next', step_next
-                print 'pause', pause
+                self.current_step.set_text(str(step))
+                self.step_time.set_text(str(step_t) + '/' + str(step_total) if val == 'Run' else 'NA')
+                self.status.set_text(val)
 
                 pv, mult = yield self.pid.holding_read('PV')
                 now = time.time() - start
@@ -291,7 +273,7 @@ class MonitorWindow(Gtk.Window):
                 self.axes.autoscale()
                 self.canvas.draw()
 
-                out, mult = yield self.pid.holding_read('OUT', busy=False)
+                out, mult = yield self.pid.holding_read('OUT')
                 now = time.time() - start
                 if len(self.out_y) > 1 and self.out_y[-2] == self.out_y[-1] == out:
                     self.out_x[-1] = now
@@ -303,7 +285,8 @@ class MonitorWindow(Gtk.Window):
                 self.out_axes.autoscale()
                 self.canvas.draw()
             except Exception, e:
-                print 'monitor error', str(e)
+                print 'monitor error', e
+                traceback.print_exc(file=sys.stdout)
 
             d = twisted.internet.defer.Deferred()
             twisted.internet.reactor.callLater(0.300 , d.callback, None)
